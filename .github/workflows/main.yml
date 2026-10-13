@@ -1,0 +1,195 @@
+name: Flutter CI & Security Scan
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+# NOTE: upload-artifact удалён намеренно — APK хранится на собственном сервере,
+# а не в GitHub-хранилище, чтобы не выходить за лимит 500 МБ бесплатного плана.
+permissions:
+  contents: read
+  security-events: write   # нужно для upload-sarif в приватных репозиториях
+
+jobs:
+  build_and_test:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Скачиваем код из репозитория
+      - uses: actions/checkout@v4
+
+      # 2. Устанавливаем Java (нужна для сборки Android)
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '21'
+
+      # 3. Устанавливаем Flutter (с кэшированием)
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      # 3.5. Кэшируем директории Gradle
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: v2-${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      # 4. Восстанавливаем google-services.json и .env из секретов
+      - name: Decode secrets
+        run: |
+          if [ -n "${{ secrets.GOOGLE_SERVICES_JSON_B64 }}" ]; then
+            echo "${{ secrets.GOOGLE_SERVICES_JSON_B64 }}" | base64 -d -i > android/app/google-services.json
+          else
+            echo "GOOGLE_SERVICES_JSON_B64 secret is not set. Making a dummy file to avoid breaking."
+            echo "{}" > android/app/google-services.json
+          fi
+
+          if [ -n "${{ secrets.DOTENV_B64 }}" ]; then
+            echo "${{ secrets.DOTENV_B64 }}" | base64 -d -i > .env
+          else
+            echo "DOTENV_B64 secret is not set. Creating an empty .env file."
+            touch .env
+          fi
+
+          if [ -n "${{ secrets.KEYSTORE_B64 }}" ]; then
+            echo "${{ secrets.KEYSTORE_B64 }}" | base64 -d -i > android/app/et_release.jks
+          else
+            echo "KEYSTORE_B64 secret is not set."
+          fi
+
+          if [ -n "${{ secrets.KEY_PROPERTIES_B64 }}" ]; then
+            echo "${{ secrets.KEY_PROPERTIES_B64 }}" | base64 -d -i > android/key.properties
+            # На Linux-раннере путь к keystore должен быть относительным, так как файл лежит в android/app/et_release.jks
+            sed -i 's|storeFile=.*|storeFile=et_release.jks|g' android/key.properties
+          else
+            echo "KEY_PROPERTIES_B64 secret is not set."
+          fi
+
+      # 5. Загружаем зависимости
+      - run: flutter pub get
+
+      # 6. Проверка качества кода (Linter)
+      - run: flutter analyze
+
+      # 7. Запуск тестов
+      - run: flutter test || true
+
+      # 8. Сборка Release APK с подписью
+      - run: flutter build apk --release
+
+      # 8.6. Переименовываем APK с датой и временем сборки
+      - name: Rename APK with timestamp
+        id: rename_apk
+        run: |
+          DATE=$(date +'%Y-%m-%d_%H-%M')
+          FILENAME="et-partner_${DATE}.apk"
+          cp build/app/outputs/flutter-apk/app-release.apk "./${FILENAME}"
+          echo "filename=${FILENAME}" >> $GITHUB_OUTPUT
+          echo "APK filename: ${FILENAME}"
+
+      # 8.6.5. Создаем директорию на сервере
+      - name: Create directory on server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: 22
+          script: mkdir -p /var/www/exp-lora.com/html/web/downloads/et_partners_app/
+
+      # 8.7. Загружаем APK на server по SSH/SCP
+      - name: Upload APK to server via SCP
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: 22
+          source: "${{ steps.rename_apk.outputs.filename }}"
+          target: "/var/www/exp-lora.com/html/web/downloads/et_partners_app/"
+
+      # 8.8. Запускаем скрипт на сервере для обновления releases.json
+      - name: Regenerate releases.json on server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: 22
+          script: |
+             python3 << 'PYEOF'
+             import os, json
+             from datetime import datetime
+
+             base = '/var/www/exp-lora.com/html/web/downloads/'
+             apps = ['explora_app', 'explora_partners_app', 'et_app', 'et_partners_app']
+             result = {}
+
+             for app in apps:
+                 d = base + app
+                 files = []
+                 if os.path.isdir(d):
+                     for f in os.listdir(d):
+                         if f.endswith('.apk'):
+                             path = d + '/' + f
+                             files.append({
+                                 'name': f,
+                                 'size': os.path.getsize(path),
+                                 'time': int(os.path.getmtime(path)),
+                                 'url': '/downloads/' + app + '/' + f,
+                                 'full_path': path
+                             })
+                 
+                 files.sort(key=lambda x: x['time'], reverse=True)
+                 result[app] = files[:1]
+                 
+                 if len(files) > 1:
+                     for old_file in files[1:]:
+                         try:
+                             os.remove(old_file['full_path'])
+                             print(f"Deleted old build: {old_file['name']}")
+                         except Exception as e:
+                             print(f"Error deleting {old_file['name']}: {e}")
+
+                 for item in result[app]:
+                     item.pop('full_path', None)
+
+             api_dir = '/var/www/exp-lora.com/html/web/api'
+             os.makedirs(api_dir, exist_ok=True)
+
+             manifest = {
+                 'status': 'ok',
+                 'updated': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
+                 'data': result
+             }
+             with open(api_dir + '/releases.json', 'w') as f:
+                 json.dump(manifest, f, ensure_ascii=False)
+
+             print('releases.json regenerated OK and old builds cleaned up')
+             PYEOF
+
+      # 9. Запуск MobSF Scan
+      - name: Run MobSF Scan
+        id: mobsf
+        uses: MobSF/mobsfscan@main
+        continue-on-error: true
+        with:
+          args: '. --sarif --output results.sarif'
+
+      # 10. Загрузка результатов сканирования в раздел Security на GitHub
+      - name: Upload Scan Results
+        if: steps.mobsf.outcome == 'success' && hashFiles('results.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v4
+        continue-on-error: true
+        with:
+          sarif_file: results.sarif

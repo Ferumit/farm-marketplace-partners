@@ -1,0 +1,15 @@
+name: et_core
+description: >-
+  The shared model of the ET platform: carcasses, orders, the road a deal travels and the money
+  along it. Both apps depend on this package, and the website mirrors the same arithmetic in
+  js/carcass.js and js/order-status.js - the server (functions/index.js) remains the only authority
+  on prices, but every surface has to agree with it or the buyer sees one number and pays another.
+version: 1.0.0
+publish_to: none
+
+environment:
+  sdk: ^3.6.0
+
+dev_dependencies:
+  lints: ^5.1.1
+  test: ^1.25.15

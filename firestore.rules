@@ -1,0 +1,473 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Staff (administrators) = an unforgeable custom claim AND a live staff/{uid} record.
+    //
+    // The claim is set only by the Admin SDK (grantStaffRole), so a client cannot mint it. But it
+    // rides inside the ID token and survives up to an hour after revocation, so on its own a
+    // revoked administrator would keep reading for that hour. revokeStaffRole deletes the record
+    // at once - requiring both makes revoking someone take effect immediately.
+    function isStaff() {
+      return request.auth != null
+        && request.auth.token.role in ['admin', 'support']
+        && exists(/databases/$(database)/documents/staff/$(request.auth.uid));
+    }
+
+    // A region is stored as its ISO 3166-2:KZ code (the site's js/regions.js). Optional, because
+    // the apps do not send one yet - but when present it must be one of the 20 real regions, so the
+    // map and the filters can trust it without re-checking.
+    function validRegion(data) {
+      return !('regionCode' in data) || data.regionCode == null
+        || data.regionCode in ['KZ-10', 'KZ-11', 'KZ-15', 'KZ-19', 'KZ-23', 'KZ-27', 'KZ-31',
+                               'KZ-33', 'KZ-35', 'KZ-39', 'KZ-43', 'KZ-47', 'KZ-55', 'KZ-59',
+                               'KZ-61', 'KZ-62', 'KZ-63', 'KZ-71', 'KZ-75', 'KZ-79'];
+    }
+
+    // A farm's storefront (the site's cabinet → Витрина): description, slaughterhouse video, paid
+    // cutting options and delivery tariffs. It sits on the public profile because buyers read it
+    // there; the limits keep one farm from bloating what every visitor downloads.
+    function validStorefront(data) {
+      return !('storefront' in data) || data.storefront == null
+        || (data.storefront is map
+            && data.storefront.get('description', '') is string
+            && data.storefront.get('description', '').size() <= 3000
+            && data.storefront.get('cutting', []) is list
+            && data.storefront.get('cutting', []).size() <= 20
+            && data.storefront.get('delivery', []) is list
+            && data.storefront.get('delivery', []).size() <= 60);
+    }
+
+    // A session that proved a phone number. The public site signs every visitor in anonymously so
+    // the catalogue can be read; such a session reads, and never writes. Before this, anyone who
+    // opened example.kz held a token that could create lots, farms, animals, feed posts and chats.
+    // .get() with defaults, so a token without the `firebase` block (the emulator's test tokens)
+    // is judged by the rest of the rule instead of failing it.
+    function isRealUser() {
+      return request.auth != null
+        && request.auth.token.get('firebase', {}).get('sign_in_provider', '') != 'anonymous';
+    }
+
+    // Partners.
+    //
+    // A farm must not be able to decide anything the platform decides about it. This rule used
+    // to be a blanket `write` for the owner, which meant a farmer could set their own status to
+    // 'verified' - making the whole moderation queue decorative - and set their own rating or
+    // wallet balance while they were at it. The owner keeps their profile; the verdict and the
+    // numbers belong to the reviewPartner function.
+    match /partners/{uid} {
+      // Buyers need checked farms only. A farm on review or rejected is readable by itself and by
+      // staff: its phone number and the rest of its profile are not everyone's business, and
+      // listing the whole collection used to hand them to any anonymous visitor. A missing
+      // document stays readable, so "no such farm" still reads as "not found".
+      allow read: if request.auth != null
+        && (resource == null
+            || resource.data.status in ['verified', 'active']
+            || request.auth.uid == uid
+            || isStaff());
+
+      // Registration. Every writer - both apps and the site - creates a farm unverified and with
+      // nothing on its books. Money fields are checked only when present, so a model that ever
+      // omits one does not lock registration.
+      allow create: if isRealUser() && request.auth.uid == uid
+        && request.resource.data.status == 'pending_review'
+        && (!('rating' in request.resource.data) || request.resource.data.rating == 0)
+        && (!('totalDeals' in request.resource.data) || request.resource.data.totalDeals == 0)
+        && (!('walletBalance' in request.resource.data) || request.resource.data.walletBalance == 0)
+        && (!('pendingBalance' in request.resource.data) || request.resource.data.pendingBalance == 0)
+        && validRegion(request.resource.data)
+        && validStorefront(request.resource.data)
+        && !('publicLocation' in request.resource.data)
+        && !('locationUpdatedAt' in request.resource.data)
+        && !('certified' in request.resource.data);
+
+      // Profile edits. edit_partner_profile_screen.dart sends displayName/city/avatarUrl and the
+      // site sends name/city, so neither is affected. This also stops a long-standing app bug:
+      // re-registering an existing farm runs a non-merging set() that would silently demote it to
+      // pending_review and zero its balance - that write is now refused instead.
+      //
+      // publicLocation is the ~5 km point buyers see. Only setHubLocation writes it, deriving it
+      // from the exact point in private/location - a farm cannot publish its exact yard, or a
+      // point that disagrees with the one staff checked.
+      // `certified` - the farm's СЭС and ветконтроль certificates are approved - is set by
+      // reviewDocument alone, like every other verdict about the farm.
+      allow update: if isRealUser() && request.auth.uid == uid
+        && !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+             'status', 'rating', 'totalDeals', 'walletBalance', 'pendingBalance',
+             'reviewedAt', 'reviewedBy', 'reviewNote', 'publicLocation', 'locationUpdatedAt',
+             'certified'])
+        && validRegion(request.resource.data)
+        && validStorefront(request.resource.data);
+
+      // Account deletion stays with the owner. Deleting and re-creating only lands the farm back
+      // in pending_review, never in 'verified', so it cannot be used to skip moderation.
+      allow delete: if isRealUser() && request.auth.uid == uid;
+
+
+      // The phones this farm is signed in on, one document per FCM token. Written by the
+      // app when it signs in and deleted when it signs out; the server reads them to send push
+      // and deletes the ones Firebase reports as dead. Nobody else may list them: a token is
+      // enough to put a message in someone's notification shade.
+      match /devices/{token} {
+        allow read, delete: if isRealUser() && request.auth.uid == uid;
+        allow create, update: if isRealUser() && request.auth.uid == uid
+          && request.resource.data.token == token
+          && request.resource.data.keys().hasOnly(['token', 'platform', 'updatedAt']);
+      }
+
+      // What must not sit on the profile above, which every visitor - anonymous ones included -
+      // can read. Readable by the farm and by staff only.
+      //   identity - ИИН/БИН. Supplied by the farm while it is under review; once approved it is
+      //              part of what was checked, so changing it goes through staff.
+      //   location - the exact hub point. Written only by setHubLocation, which derives the public
+      //              point from it in the same transaction, so the two can never disagree.
+      //   review   - the moderator's latest decision and reason. Written only by reviewPartner.
+      //   contact  - the farm's email for order notifications. The farm's own business: it may set,
+      //              change or clear it at any time, review or not.
+      //   legal    - legal form, registered name and address. Like the IIN, part of what review
+      //              checks: filled in any time, changed on its own only while not yet approved.
+      match /private/{docId} {
+        function identityWrite() {
+          return docId == 'identity'
+            && getAfter(/databases/$(database)/documents/partners/$(uid)).data.status in ['pending_review', 'rejected']
+            && request.resource.data.keys().hasOnly(['iin', 'updatedAt'])
+            && request.resource.data.iin is string
+            && request.resource.data.iin.matches('^[0-9]{12}$');
+        }
+        function contactWrite() {
+          return docId == 'contact'
+            && request.resource.data.keys().hasOnly(['email', 'updatedAt'])
+            && (request.resource.data.get('email', null) == null
+                || (request.resource.data.email is string
+                    && request.resource.data.email.size() <= 254
+                    && request.resource.data.email.matches('^[^@ ]+@[^@ ]+[.][^@ ]+$')));
+        }
+        function legalWrite() {
+          return docId == 'legal'
+            && (resource == null
+                || getAfter(/databases/$(database)/documents/partners/$(uid)).data.status in ['pending_review', 'rejected'])
+            && request.resource.data.keys().hasOnly(['form', 'legalName', 'address', 'updatedAt'])
+            && request.resource.data.form in ['kh', 'fh', 'ip', 'too']
+            && request.resource.data.legalName is string && request.resource.data.legalName.size() <= 200
+            && request.resource.data.address is string && request.resource.data.address.size() <= 300;
+        }
+
+        // bank - куда платформа перечислит долю хозяйства. Меняется в любой момент, в отличие
+        // от legal: банк можно сменить, и ждать ради этого новой проверки незачем. Когда
+        // выплаты станут настоящими, у смены счёта появится цена ошибки — тогда и понадобится
+        // след: кто и когда поменял. Сейчас выплат нет, и заводить аудит ради пустого поля
+        // рано, но помнить об этом надо.
+        //
+        // IBAN Казахстана — KZ и ещё 18 знаков. БИК банка — 8 знаков. КБе — две цифры.
+        function bankWrite() {
+          return docId == 'bank'
+            && request.resource.data.keys().hasOnly(['iban', 'bic', 'bankName', 'kbe', 'updatedAt'])
+            && request.resource.data.iban is string
+            && request.resource.data.iban.matches('^KZ[0-9A-Z]{18}$')
+            && request.resource.data.bic is string
+            && request.resource.data.bic.matches('^[A-Z0-9]{8}$')
+            && request.resource.data.bankName is string
+            && request.resource.data.bankName.size() <= 200
+            && request.resource.data.kbe is string
+            && request.resource.data.kbe.matches('^[0-9]{2}$');
+        }
+
+        // kassa - доступ к онлайн-кассе хозяйства в re:Kassa, которой мы выбиваем фискальные
+        // чеки от его имени. Это не реквизиты, а ДЕЙСТВУЮЩИЕ КЛЮЧИ от чужой кассы: тот, у кого
+        // они есть, может выбивать налоговые документы под чужим БИН. Поэтому единственное
+        // место в базе, которое не читает никто из клиентов — ни сам фермер обратно, ни
+        // сотрудник в админке. Читает только сервер через Admin SDK, который правил не знает.
+        //
+        // Заполняется один раз: фермер регистрирует кассу своей ЭЦП, подключает к ней наше
+        // приложение и переносит сюда три значения. Номер ККМ в КГД (kgdKkmId) дописывает
+        // сервер при первом входе — спрашивать его у человека незачем.
+        function kassaWrite() {
+          return docId == 'kassa'
+            && request.resource.data.keys().hasOnly(['znm', 'password', 'pin', 'kgdKkmId', 'updatedAt'])
+            && request.resource.data.keys().hasAll(['znm', 'password', 'pin'])
+            && request.resource.data.znm is string
+            && request.resource.data.znm.matches('^[A-Za-z0-9-]{4,40}$')
+            && request.resource.data.password is string
+            && request.resource.data.password.size() > 0
+            && request.resource.data.password.size() <= 300
+            && request.resource.data.pin is string
+            && request.resource.data.pin.matches('^[0-9]{4,6}$');
+        }
+
+        // kassaInfo - то же подключение без секретов: заводской номер и дата. Читать можно:
+        // экрану и чек-листу надо знать, что касса подключена, и ключи для этого не нужны.
+        function kassaInfoWrite() {
+          return docId == 'kassaInfo'
+            && request.resource.data.keys().hasOnly(['znm', 'connectedAt'])
+            && request.resource.data.znm is string
+            && request.resource.data.znm.matches('^[A-Za-z0-9-]{4,40}$');
+        }
+
+        allow read: if request.auth != null && docId != 'kassa'
+          && (request.auth.uid == uid || isStaff());
+        allow create, update: if isRealUser() && request.auth.uid == uid
+          && (identityWrite() || contactWrite() || legalWrite() || bankWrite()
+              || kassaWrite() || kassaInfoWrite());
+        allow delete: if isRealUser() && request.auth.uid == uid
+          && docId in ['identity', 'contact', 'kassa', 'kassaInfo'];
+      }
+
+      // The farm's own certificates (СЭС, ветконтроль): the same shape and the same rule as the
+      // paperwork on an animal. The farm files them PENDING; only reviewDocument decides them - and
+      // sets the public `certified` badge from what it decided.
+      match /documents/{docId} {
+        allow read: if request.auth != null && (request.auth.uid == uid || isStaff());
+        allow create: if isRealUser() && request.auth.uid == uid
+          && request.resource.data.status == 'pending'
+          && request.resource.data.get('reviewedBy', null) == null
+          && request.resource.data.partnerId == uid
+          && request.resource.data.kind in ['ses', 'vet_control', 'other'];
+        allow update: if false;
+        allow delete: if isRealUser() && request.auth.uid == uid && resource.data.status == 'pending';
+      }
+    }
+
+    // Clients - a buyer's profile is personal data (phone, city). Only the buyer, and staff
+    // helping them, may read it. It used to be readable by any authenticated user, which became a
+    // real leak once the site started signing visitors in anonymously.
+    match /clients/{uid} {
+      allow read: if request.auth != null && (request.auth.uid == uid || isStaff());
+      allow write: if isRealUser() && request.auth.uid == uid;
+
+      match /purchases/{purchaseId} {
+        allow read: if request.auth != null && (request.auth.uid == uid || isStaff());
+        allow write: if isRealUser() && request.auth.uid == uid;
+      }
+
+      // «Корзина» - what this buyer has picked and not yet ordered. Theirs alone: an unfinished
+      // shopping list is nobody else's business, staff included. Nothing here is trusted as
+      // money - createOrder recomputes every amount from the lot and the farm's storefront.
+      match /cart/{itemId} {
+        allow read, write: if isRealUser() && request.auth.uid == uid;
+      }
+
+      // The phones this buyer is signed in on, one document per FCM token. Written by the
+      // app when it signs in and deleted when it signs out; the server reads them to send push
+      // and deletes the ones Firebase reports as dead. Nobody else may list them: a token is
+      // enough to put a message in someone's notification shade.
+      match /devices/{token} {
+        allow read, delete: if isRealUser() && request.auth.uid == uid;
+        allow create, update: if isRealUser() && request.auth.uid == uid
+          && request.resource.data.token == token
+          && request.resource.data.keys().hasOnly(['token', 'platform', 'updatedAt']);
+      }
+    }
+
+    // Animals - anyone authenticated can read, only the owning partner can write.
+    match /animals/{animalId} {
+      allow read: if request.auth != null;
+      allow create: if isRealUser() && request.resource.data.partnerId == request.auth.uid;
+      allow update, delete: if isRealUser() && resource.data.partnerId == request.auth.uid;
+
+      // Veterinary paperwork for this head of livestock.
+      //
+      // A subcollection rather than an array on the animal, and that IS the security model: the
+      // farmer owns the animal document and must be able to edit breed and weight, so paperwork
+      // stored in an array there could be marked approved by the farmer. Here the owner may only
+      // ever create a PENDING document, and the verdict is written by reviewDocument alone -
+      // which also writes the audit record in the same transaction. A direct client update is
+      // refused even for staff, because that path would skip the audit.
+      match /documents/{docId} {
+        function animalOwner() {
+          return get(/databases/$(database)/documents/animals/$(animalId)).data.partnerId;
+        }
+
+        // Not public: a certificate carries the farm details and the signing vet.
+        allow read: if request.auth != null
+          && (request.auth.uid == animalOwner() || isStaff());
+
+        allow create: if isRealUser()
+          && request.auth.uid == animalOwner()
+          && request.resource.data.status == 'pending'
+          && request.resource.data.reviewedBy == null
+          && request.resource.data.partnerId == request.auth.uid;
+
+        allow update: if false;
+
+        // A wrong scan can be withdrawn by the farmer while nobody has reviewed it; once reviewed
+        // it stays as the record of what was submitted.
+        allow delete: if isRealUser()
+          && request.auth.uid == animalOwner() && resource.data.status == 'pending';
+      }
+    }
+
+    // The moderation queue lists pending documents across EVERY animal at once, which is a
+    // collection-group query and needs its own rule at this wildcard path.
+    match /{path=**}/documents/{docId} {
+      allow read: if isStaff();
+    }
+
+    // Lots. A lot carries money the moment people book shares in it, so the owner keeps full
+    // control of its content but loses control of the two fields that represent that money.
+    //
+    //   bookedShares - never writable from a client at all. It moves only inside the
+    //                  createOrder / updateOrderStatus transactions (Admin SDK).
+    //   status       - frozen while bookedShares > 0, so a lot people paid into cannot be pulled
+    //                  from sale or deleted. An EMPTY lot can still be published, unpublished and
+    //                  deleted freely, which is what lot_detail_screen.dart does.
+    match /lots/{lotId} {
+      allow read: if request.auth != null;
+      allow create: if isRealUser()
+        && request.resource.data.partnerId == request.auth.uid
+        && request.resource.data.bookedShares == 0
+        && validRegion(request.resource.data);
+      allow update: if isRealUser()
+        && resource.data.partnerId == request.auth.uid
+        && request.resource.data.bookedShares == resource.data.bookedShares
+        && (request.resource.data.status == resource.data.status
+            || resource.data.bookedShares == 0)
+        && validRegion(request.resource.data);
+      allow delete: if isRealUser()
+        && resource.data.partnerId == request.auth.uid
+        && resource.data.bookedShares == 0;
+
+      // The lot's production steps. The site creates a lot and its six steps in ONE batch, where a
+      // plain get() of the lot still sees nothing - so this checked a missing document and refused
+      // every lot the site tried to create. getAfter() sees the lot being written alongside; get()
+      // stays the fallback for a batch that removes the lot.
+      match /deliveries/{deliveryId} {
+        function lotOwner() {
+          let after = getAfter(/databases/$(database)/documents/lots/$(lotId));
+          return after != null ? after.data.partnerId
+            : get(/databases/$(database)/documents/lots/$(lotId)).data.partnerId;
+        }
+        allow read: if request.auth != null;
+        allow write: if isRealUser() && request.auth.uid == lotOwner();
+      }
+    }
+
+    // Dynamic feed (the buyer app's "Лайв" tab). Nothing in either app or on the site writes it,
+    // and the old rule let any signed-in session - every anonymous visitor of the site - publish a
+    // post with any picture and text into the buyer app. Until the feature exists, posts are
+    // managed by staff through the console.
+    match /feeds/{feedId} {
+      allow read: if request.auth != null;
+      allow create, update, delete: if false;
+    }
+
+    // Chats. No client creates them - the feature was never wired up - and the old rule let anyone
+    // who knew a chat id write themselves into its participants and then read the conversation.
+    // Until chats are created by the server (for example when an order is paid), participants can
+    // read, post under their own id and refresh the chat's last-message preview, and nobody else
+    // can do anything.
+    match /chats/{chatId} {
+      allow read: if isRealUser() && request.auth.uid in resource.data.participantIds;
+      allow create, delete: if false;
+      // The partner app's sendMessage writes the message and, in the same batch, this preview.
+      // Only these two fields - above all never participantIds.
+      allow update: if isRealUser()
+        && request.auth.uid in resource.data.participantIds
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastMessage', 'lastMessageAt'])
+        && request.resource.data.get('lastMessage', '') is string
+        && request.resource.data.get('lastMessageAt', request.time) is timestamp;
+
+      match /messages/{messageId} {
+        allow read: if isRealUser()
+          && request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participantIds;
+        allow create: if isRealUser()
+          && request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participantIds
+          && request.resource.data.senderId == request.auth.uid;
+        allow update, delete: if false;
+      }
+    }
+
+    // Orders. Both parties read their own; staff read all of them to watch the platform and help.
+    // Nobody writes from a client: the functions are the only writers, because every order write
+    // also moves bookedShares and the lot status in the same transaction.
+    match /orders/{orderId} {
+      allow read: if request.auth != null
+        && (request.auth.uid == resource.data.buyerUid
+            || request.auth.uid == resource.data.partnerId
+            // A joint purchase is one order shared by 2-5 people: everyone in it follows the
+            // steps, while confirming, disputing and cancelling stay with the one who gathered
+            // them (updateOrderStatus checks buyerUid). Older orders have no list - hence get().
+            || request.auth.uid in resource.data.get('memberUids', [])
+            || isStaff());
+      allow create, update, delete: if false;
+    }
+
+    // Reviews. Written only by submitReview / moderateReview: a review is tied to a completed
+    // order (reviews/{orderId}), so a farm's rating can only be moved by people who bought from
+    // it - and `partners.rating` is recomputed from the published ones in the same transaction.
+    // Published reviews are public; a review waiting for moderation is seen by its author, the
+    // farm it is about, and staff.
+    match /reviews/{reviewId} {
+      allow read: if request.auth != null
+        && (resource.data.status == 'published'
+            || request.auth.uid == resource.data.buyerUid
+            || request.auth.uid == resource.data.partnerId
+            || isStaff());
+      allow write: if false;
+    }
+
+    // Joint purchases. The group itself is readable by anyone holding the link - that is what the
+    // link is for - so it carries no contact details: the delivery address and the organiser's
+    // phone live in private/, for the people in the group and for staff. Everything is written by
+    // createGroupBuy / joinGroupBuy / leaveGroupBuy, which also place the order when the last
+    // place is filled.
+    match /groupBuys/{groupId} {
+      allow read: if request.auth != null;
+      allow write: if false;
+
+      match /private/{docId} {
+        allow read: if request.auth != null
+          && (isStaff()
+              || request.auth.uid in get(/databases/$(database)/documents/groupBuys/$(groupId)).data.memberUids);
+        allow write: if false;
+      }
+    }
+
+    // Notifications. Written only by the functions, inside the same transaction as the event they
+    // announce: anything a browser may write, a browser may forge, and "хозяйство приняло заказ"
+    // is not a sentence a stranger gets to put in front of a buyer. The addressee reads their own
+    // and marks them read - and only read, never the text, the link or the addressee.
+    match /notifications/{notificationId} {
+      allow read: if request.auth != null && request.auth.uid == resource.data.uid;
+      allow create, delete: if false;
+      allow update: if isRealUser() && request.auth.uid == resource.data.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read', 'readAt'])
+        && request.resource.data.read == true;
+    }
+
+    // Payment ledger. Append-only, written exclusively by the payment webhook (Admin SDK). A
+    // forged row here is a forged payment, so no client may ever write it.
+    match /payments/{paymentId} {
+      allow read: if request.auth != null
+        && (request.auth.uid == resource.data.buyerUid
+            || request.auth.uid == resource.data.partnerId
+            || isStaff());
+      allow create, update, delete: if false;
+    }
+
+    // Idempotency keys for createOrder. No client ever needs these.
+    match /orderIntents/{intentId} {
+      allow read, write: if false;
+    }
+
+    // Disputes - a client files and reads their own; staff read all of them to resolve them.
+    match /disputes/{disputeId} {
+      allow create: if isRealUser() && request.auth.uid == request.resource.data.uid;
+      allow read: if request.auth != null && (request.auth.uid == resource.data.uid || isStaff());
+      allow update, delete: if false;
+    }
+
+    // Who is staff. Written only by grantStaffRole / revokeStaffRole; readable by staff so the
+    // panel can show the team. Its existence is what makes a claim count (see isStaff).
+    match /staff/{uid} {
+      allow read: if isStaff();
+      allow write: if false;
+    }
+
+    // The audit trail. Written only inside the same transaction as the decision it records.
+    // Nobody can edit or delete an entry - not even an admin - or it would not be an audit trail.
+    match /adminActions/{actionId} {
+      allow read: if isStaff();
+      allow write: if false;
+    }
+  }
+}

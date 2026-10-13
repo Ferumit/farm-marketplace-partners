@@ -1,0 +1,11 @@
+{
+  "name": "et-functions-tests",
+  "private": true,
+  "description": "Cloud Functions tests. Run against the local emulators under a demo- project id, so they can never touch production.",
+  "scripts": {
+    "test": "cd ../.. && firebase emulators:exec --only auth,firestore,functions --project demo-et \"node tests/functions/order-gate.test.cjs && node tests/functions/hub-location.test.cjs && node tests/functions/dispute.test.cjs && node tests/functions/farm-documents.test.cjs && node tests/functions/order-v2.test.cjs && node tests/functions/order-flow.test.cjs && node tests/functions/notifications.test.cjs && node tests/functions/reviews.test.cjs && node tests/functions/group-buy.test.cjs && node tests/functions/push.test.cjs && node tests/functions/delete-account.test.cjs && node tests/functions/delete-lot.test.cjs\"",
+    "test:unit": "node ../../tests/functions/freedompay.test.cjs && node ../../tests/functions/rekassa.test.cjs",
+    "test:payments": "node run-payments.cjs",
+    "test:cycle": "node run-cycle.cjs"
+  }
+}

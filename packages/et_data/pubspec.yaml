@@ -1,0 +1,29 @@
+name: et_data
+description: >-
+  Firebase for both ET apps: the collections, the callable functions and the uploads, typed
+  through et_core. Written once because a screen that invents its own path or its own price does
+  not get a bug - it gets a refusal from the security rules, usually on someone else's phone.
+version: 1.0.0
+publish_to: none
+
+environment:
+  sdk: ^3.6.0
+  flutter: ">=3.27.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  et_core:
+    path: ../et_core
+  cloud_firestore: ^6.3.0
+  cloud_functions: ^6.1.0
+  firebase_core: ^4.7.0
+  firebase_auth: ^6.4.0
+  firebase_storage: ^13.3.0
+  firebase_messaging: ^16.2.0
+  app_links: ^6.4.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0

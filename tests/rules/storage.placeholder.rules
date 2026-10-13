@@ -1,0 +1,10 @@
+rules_version = '2';
+// Placeholder so the Storage emulator can start: its config may not point outside this folder.
+// storage.rules.test.mjs loads the real ../../storage.rules into the emulator itself.
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -1,0 +1,120 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // A session that proved a phone number. The public site signs every visitor in anonymously so
+    // the catalogue can be read: such a session sees images but never uploads - otherwise anyone
+    // could use this bucket as free file hosting. .get() with defaults, as in firestore.rules.
+    function isRealUser() {
+      return request.auth != null
+        && request.auth.token.get('firebase', {}).get('sign_in_provider', '') != 'anonymous';
+    }
+
+    function isReviewer() {
+      return request.auth != null && request.auth.token.get('role', '') in ['admin', 'support'];
+    }
+
+    // Only create and update carry a file. A delete has no request.resource, so size and type
+    // checks must never be folded into a rule that also covers delete - it would refuse every one.
+    function imageUnder(mb) {
+      return request.resource.size < mb * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+    }
+
+    // Seeded catalogue images (Admin SDK): readable, never written by a client.
+    match /animals/{fileName} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+    match /lots/{fileName} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+
+    // Animal photos, in the farm's own folder.
+    match /animals/{ownerId}/{allPaths=**} {
+      allow read: if request.auth != null;
+      allow create, update: if isRealUser() && request.auth.uid == ownerId && imageUnder(10);
+      allow delete: if isRealUser() && request.auth.uid == ownerId;
+    }
+
+    // Lot covers (lots/{uid}/...) and delivery-step photos (lots/{uid}/steps/...), in the farm's
+    // own folder. There used to be no rule for either path, so both uploads were refused: a lot
+    // could not be created with a cover and a delivery step could not be completed - on the site
+    // and in the app alike.
+    match /lots/{ownerId}/{allPaths=**} {
+      allow read: if request.auth != null;
+      allow create, update: if isRealUser() && request.auth.uid == ownerId && imageUnder(10);
+      allow delete: if isRealUser() && request.auth.uid == ownerId;
+    }
+
+    // The farm's storefront media: the slaughterhouse video buyers watch in the catalogue, and a
+    // still for its cover. Public like the storefront itself; written by the farm only.
+    match /farms/{ownerId}/{allPaths=**} {
+      allow read: if request.auth != null;
+      allow create, update: if isRealUser() && request.auth.uid == ownerId
+        && ((request.resource.contentType.matches('video/.*') && request.resource.size < 150 * 1024 * 1024)
+            || imageUnder(10));
+      allow delete: if isRealUser() && request.auth.uid == ownerId;
+    }
+
+    // Files of an order's steps (cabinet → order card): the live animal, the ready meat, documents,
+    // the scale. Written by the farm into its own folder only - updateOrderStatus accepts a file
+    // for an order only from orders/{that order's farm}/{that order}/, so a farm cannot hang files
+    // on another farm's order. Readable when signed in: the links themselves travel only on the
+    // order, which only its buyer, its farm and staff can read.
+    match /orders/{ownerId}/{orderId}/{fileName} {
+      allow read: if request.auth != null;
+      allow create, update: if isRealUser() && request.auth.uid == ownerId
+        && ((request.resource.contentType.matches('video/.*') && request.resource.size < 150 * 1024 * 1024)
+            || imageUnder(15)
+            || (request.resource.contentType == 'application/pdf' && request.resource.size < 20 * 1024 * 1024));
+      allow delete: if isRealUser() && request.auth.uid == ownerId;
+    }
+
+    // Profile photos: users/{uid}/avatar.jpg from the partner app, avatars/clients/{uid}.jpg from
+    // the buyer app. Neither path had a rule, so changing a profile photo always failed.
+    match /users/{ownerId}/{allPaths=**} {
+      allow read: if request.auth != null;
+      allow create, update: if isRealUser() && request.auth.uid == ownerId && imageUnder(5);
+      allow delete: if isRealUser() && request.auth.uid == ownerId;
+    }
+    match /avatars/clients/{fileName} {
+      allow read: if request.auth != null;
+      allow create, update: if isRealUser() && fileName == request.auth.uid + '.jpg' && imageUnder(5);
+      allow delete: if isRealUser() && fileName == request.auth.uid + '.jpg';
+    }
+
+    // Veterinary documents. Uploaded by the owning partner, read by the owner and by a reviewer -
+    // the whole point of collecting them is that somebody checks them.
+    match /documents/{uid}/{allPaths=**} {
+      function allowedType() {
+        return request.resource.contentType.matches('image/.*')
+          || request.resource.contentType == 'application/pdf'
+          || request.resource.contentType == 'application/msword'
+          || request.resource.contentType ==
+             'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+      }
+
+      allow read: if request.auth != null && (request.auth.uid == uid || isReviewer());
+      allow create, update: if isRealUser()
+                            && request.auth.uid == uid
+                            && request.resource.size < 20 * 1024 * 1024
+                            && allowedType();
+      allow delete: if isRealUser() && request.auth.uid == uid;
+    }
+
+    // Dispute evidence (photo or video). The old single rule checked the upload's size on reads
+    // too, where there is no upload - so reading the file back (the download link the site asks
+    // for right after uploading) was refused, and filing a dispute with evidence failed. Evidence
+    // is read by its owner and by staff, and never edited or deleted from a client.
+    match /disputes/{uid}/{allPaths=**} {
+      allow read: if request.auth != null && (request.auth.uid == uid || isReviewer());
+      allow create: if isRealUser()
+                    && request.auth.uid == uid
+                    && request.resource.size < 50 * 1024 * 1024
+                    && (request.resource.contentType.matches('image/.*')
+                        || request.resource.contentType.matches('video/.*'));
+      allow update, delete: if false;
+    }
+  }
+}

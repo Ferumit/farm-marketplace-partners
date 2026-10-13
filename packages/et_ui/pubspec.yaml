@@ -1,0 +1,55 @@
+name: et_ui
+description: >-
+  The look of both ET apps: the palette the website uses, the type, and the handful of parts every
+  screen is built from - a status chip, a money row, the four steps of a deal, an empty state.
+  Shared so that the buyer and the farm see one product rather than two that resemble each other.
+version: 1.0.0
+publish_to: none
+
+environment:
+  sdk: ^3.6.0
+  flutter: ">=3.27.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  et_core:
+    path: ../et_core
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+# Шрифты лежат в сборке, а не качаются при запуске.
+#
+# Раньше их тянул пакет google_fonts, и на телефоне без связи — то есть в цеху или в степи, где
+# приложением и пользуются — заголовки молча подменялись системным шрифтом. Файлы те же самые,
+# что качал пакет, байт в байт, так что вид не изменился.
+#
+# Лицензии OFL лежат рядом с начертаниями: шрифты свободные, но требуют сохранять текст лицензии.
+flutter:
+  assets:
+    - assets/fonts/OFL-Inter.txt
+    - assets/fonts/OFL-PlayfairDisplay.txt
+  fonts:
+    - family: Inter
+      fonts:
+        - asset: assets/fonts/Inter-Regular.ttf
+          weight: 400
+        - asset: assets/fonts/Inter-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/Inter-SemiBold.ttf
+          weight: 600
+        - asset: assets/fonts/Inter-Bold.ttf
+          weight: 700
+        - asset: assets/fonts/Inter-ExtraBold.ttf
+          weight: 800
+    - family: Playfair Display
+      fonts:
+        - asset: assets/fonts/PlayfairDisplay-Regular.ttf
+          weight: 400
+        - asset: assets/fonts/PlayfairDisplay-Bold.ttf
+          weight: 700
+        - asset: assets/fonts/PlayfairDisplay-ExtraBold.ttf
+          weight: 800

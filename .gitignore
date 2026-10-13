@@ -1,0 +1,74 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# The .vscode folder contains launch configuration and tasks you configure in
+# VS Code which you may wish to be included in version control, so this line
+# is commented out by default.
+#.vscode/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+/coverage/
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Android Studio will place build artifacts here
+/android/app/debug
+/android/app/profile
+/android/app/release
+
+# Release signing — never commit these
+/android/key.properties
+/android/app/*.jks
+/android/app/*.keystore
+
+# Node.js (scripts/tooling only)
+node_modules/
+package-lock.json
+# ...except Cloud Functions, where the lockfile pins what actually gets deployed. This code
+# moves orders and share counts; reproducible builds matter more than tidiness here.
+!functions/package-lock.json
+users.json
+users2.json
+upload_animal_images.js
+
+# Deploy-time secrets and personal data for Cloud Functions
+functions/.env
+functions/.env.*
+# ...но образец должен лежать в репозитории: по нему заводят своё окружение.
+!functions/.env.example
+functions/.secret.local
+tests/rules/node_modules/
+
+# Flutter test/build output inside the shared packages.
+packages/*/build/
+
+# Готовые сборки — их место в релизах, а не в истории.
+dist/
